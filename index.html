@@ -303,7 +303,7 @@ async function carregarDia(){
     sb.from('dias').select('*').match(f).maybeSingle(),
     sb.from('vendas').select('*').match(f).order('criado_em'),
     sb.from('atendimentos').select('*').match(f).order('inicio'),
-    sb.from('fila').select('*').eq('loja_id',loja),
+    sb.from('fila').select('*').match(f),
     sb.from('caixa_mov').select('*').match(f).order('criado_em'),
     sb.from('atend_manual').select('*').match(f),
     sb.from('reaberturas').select('*').match(f).order('criado_em')
@@ -329,8 +329,9 @@ async function carregarMes(){
 async function garantirFila(){
   const falta=equipe(loja).filter(v=>!D.fila.some(f=>f.vendedora===v.nome));
   if(!falta.length) return;
-  const linhas=falta.map((v,i)=>({loja_id:loja,vendedora:v.nome,status:'disp',desde:new Date().toISOString(),ordem:D.fila.length+i+1}));
-  const r=await sb.from('fila').upsert(linhas,{onConflict:'loja_id,vendedora'}).select();
+  const linhas=falta.map((v,i)=>({loja_id:loja,data:dia,vendedora:v.nome,status:'disp',
+    desde:new Date().toISOString(),ordem:D.fila.length+i+1}));
+  const r=await sb.from('fila').upsert(linhas,{onConflict:'loja_id,data,vendedora'}).select();
   if(!r.error&&r.data) D.fila.push(...r.data);
 }
 async function recarregar(){ await carregarDia(); render(); }
@@ -442,10 +443,27 @@ async function fecharDia(){
   if(D.dia && D.dia.caixa_conf==null && c.gaveta>0.005){
     if(!confirm('A gaveta ainda não foi contada. Fechar mesmo assim?')) return;
   }
+  // encerra o que ficou aberto na Lista da vez, senão vaza para o dia seguinte
+  const abertos=await sb.from('atendimentos').select('id')
+    .match({loja_id:loja,data:dia}).is('fim',null);
+  if(abertos.error) return erro(abertos.error);
+  const qtd=(abertos.data||[]).length;
+  if(qtd){
+    const u=await sb.from('atendimentos').update({fim:new Date().toISOString()})
+      .in('id',abertos.data.map(x=>x.id));
+    if(u.error) return erro(u.error);
+  }
+  const f2=await sb.from('fila').update({status:'disp',motivo:null,desde:new Date().toISOString()})
+    .match({loja_id:loja,data:dia}).neq('status','disp');
+  if(f2.error) return erro(f2.error);
+
   const r=await sb.from('dias').upsert({loja_id:loja,data:dia,fechado:true,
     fechado_por:eu.nome, fechado_em:new Date().toISOString()},{onConflict:'loja_id,data'}).select().single();
   if(r.error) return erro(r.error);
-  D.dia=r.data; toast('Dia '+labelDia(dia)+' fechado'); render();
+  D.dia=r.data;
+  await carregarDia();
+  toast('Dia '+labelDia(dia)+' fechado'+(qtd?' · '+qtd+' atendimento'+(qtd===1?'':'s')+' em aberto foram encerrados':''));
+  render();
 }
 async function reabrirDia(quem, motivo){
   const reg=await sb.from('reaberturas').insert({loja_id:loja,data:dia,quem,motivo}).select().single();
@@ -471,7 +489,7 @@ function modalReabrir(){
 // devolve null se não houver, ou undefined se a consulta falhou.
 async function atendimentoAberto(nome){
   const r=await sb.from('atendimentos').select('*')
-    .eq('loja_id',loja).eq('vendedora',nome).is('fim',null)
+    .eq('loja_id',loja).eq('data',dia).eq('vendedora',nome).is('fim',null)
     .order('inicio',{ascending:false}).limit(1);
   if(r.error){ erro(r.error); return undefined; }
   return (r.data && r.data[0]) || null;
@@ -504,9 +522,9 @@ async function liberar(nome){
   toast(nome+' voltou para a fila');
 }
 async function mudarFila(nome,status,motivo){
-  const linha={loja_id:loja,vendedora:nome,status,desde:new Date().toISOString(),motivo:motivo||null};
+  const linha={loja_id:loja,data:dia,vendedora:nome,status,desde:new Date().toISOString(),motivo:motivo||null};
   if(status==='disp') linha.ordem=proxOrdem();
-  const r=await sb.from('fila').upsert(linha,{onConflict:'loja_id,vendedora'}).select().single();
+  const r=await sb.from('fila').upsert(linha,{onConflict:'loja_id,data,vendedora'}).select().single();
   if(r.error) return erro(r.error);
   const i=D.fila.findIndex(f=>f.vendedora===nome);
   if(i>=0) D.fila[i]=r.data; else D.fila.push(r.data);
@@ -545,7 +563,7 @@ async function encerrarAt(nome,dados,venda){
 
 /* ===================== navegação ===================== */
 const telas={};
-const NAV_G=[['fila','Lista da vez'],['lancar','Lançar'],['caixa','Caixa'],['escala','Escala'],['painel','Painel'],['perdas','Perdas'],['relatorio','Relatório'],['equipe','Equipe'],['despesas','Despesas'],['ajustes','Ajustes']];
+const NAV_G=[['dia','O dia'],['caixa','Caixa'],['escala','Escala'],['painel','Painel'],['perdas','Perdas'],['relatorio','Relatório'],['equipe','Equipe'],['despesas','Despesas'],['ajustes','Ajustes']];
 const NAV_V=[['fila','Minha vez'],['sangria','Sangria'],['meu','Meu painel']];
 const NAV_T=NAV_G.filter(m=>m[0]!=='ajustes');
 const menus=()=>eu.papel==='tablet'?NAV_T:(gestor()?NAV_G:NAV_V);
@@ -574,20 +592,20 @@ const selData=()=>opera()?`<div class="fld" style="width:150px"><label>Data</lab
 const selMes=()=>`<div class="fld" style="width:150px"><label>Mês</label><input type="month" id="mesP" value="${mesPainel}"></div>`;
 
 /* ===================== tela: lista da vez ===================== */
-telas.fila = () => {
+telas.fila = (cab) => {
   const sou=!opera();
   const disp=filaDisp(), atd=porSt('atend'), ind=porSt('indisp');
   const vez=disp.length?disp[0].nome:'';
   const cartao=(v,s)=>{
-    const f=st(v.nome), pode=opera()||eu.nome===v.nome;
+    const f=st(v.nome), pode=(opera()||eu.nome===v.nome) && !diaFechado();
     const kv=apura(D.vendas.filter(x=>x.vendedora===v.nome));
     let sub='';
     if(s==='disp')   sub=(v.nome===vez?'é a vez dela · ':'')+'livre há '+tempo(minsDesde(f.desde));
     let preso=false;
     if(s==='atend'){
       const ab=D.at.find(a=>a.vendedora===v.nome&&!a.fim);
-      preso = !ab && st(v.nome).desde && st(v.nome).desde.slice(0,10)!==dia;
-      sub = preso ? 'estado preso desde '+labelDia(f.desde.slice(0,10))
+      preso = !ab;
+      sub = preso ? 'marcada como atendendo, sem atendimento aberto'
                   : 'atendendo desde '+hhmm(f.desde)+' · '+tempo(minsDesde(f.desde));
     }
     if(s==='indisp') sub=tempo(minsDesde(f.desde));
@@ -599,18 +617,22 @@ telas.fila = () => {
     if(pode&&s==='indisp') acts=`<button class="ib back" data-volta="${esc(v.nome)}">Voltar</button>`;
     return `<div class="pes ${s==='disp'&&v.nome===vez?'vez':''}">
       <div class="av">${esc(ini(v.nome))}</div>
-      <div class="i"><b>${esc(v.nome)} ${s==='indisp'&&f.motivo?`<span class="tag w">${esc(f.motivo)}</span>`:''}${preso?' <span class="tag w">sobrou de outro dia</span>':''}</b>
+      <div class="i"><b>${esc(v.nome)} ${s==='indisp'&&f.motivo?`<span class="tag w">${esc(f.motivo)}</span>`:''}${preso?' <span class="tag w">travada</span>':''}</b>
         <span>${sub} · ${atendDe(v.nome)} atend. · R$ ${brl0(kv.venda)}</span></div>
       <div class="acts">${acts}</div></div>`;
   };
   const fech=D.at.filter(a=>a.fim), perdas=fech.filter(a=>a.vendeu===false);
   return `
-  <div class="head">
+  ${cab===false?'':`<div class="head">
     <div><h1>${sou?'Minha vez':'Lista da vez'}</h1>
       <p>${labelDia(dia)} · ${fech.length} atendimento${fech.length===1?'':'s'} encerrado${fech.length===1?'':'s'}</p></div>
     <div class="spacer"></div>${selLoja()}${selData()}
-  </div>
-  ${vez?`<div class="recon ok" style="margin-bottom:14px">
+  </div>`}
+  ${diaFechado()?`<div class="recon off" style="margin-bottom:14px">
+    <div><span class="lbl">Dia fechado</span><br><b>${labelDia(dia)}</b></div>
+    <div class="spacer"></div>
+    <div style="text-align:right"><span class="lbl">a Lista da vez está encerrada</span></div></div>`:''}
+  ${vez&&!diaFechado()?`<div class="recon ok" style="margin-bottom:14px">
     <div class="av" style="background:var(--ok);color:#fff">${esc(ini(vez))}</div>
     <div><span class="lbl">Próxima a atender</span><br><b>${esc(vez)}</b></div>
     <div class="spacer"></div>
@@ -695,14 +717,14 @@ function detFim(){
 }
 
 /* ===================== tela: lançar ===================== */
-telas.lancar = () => {
+telas.lancar = (cab) => {
   const k=apura(D.vendas), somaPag=Object.keys(k.porPag).reduce((a,p)=>a+k.porPag[p],0);
   const dif=somaPag-k.venda, fecha=Math.abs(dif)<0.005;
   return `
-  <div class="head">
+  ${cab===false?'':`<div class="head">
     <div><h1>Lançar vendas</h1><p>Cada linha é uma forma de pagamento. Boleta dividida entra em duas linhas com o mesmo número.</p></div>
     <div class="spacer"></div>${selLoja()}${selData()}
-  </div>
+  </div>`}
   ${diaFechado()?`<div class="recon off" style="margin-bottom:14px">
     <div><span class="lbl">Dia fechado</span><br><b>${labelDia(dia)}</b></div>
     <div class="spacer"></div>
@@ -771,6 +793,22 @@ telas.lancar = () => {
         A coluna Fila conta sozinha, pelos atendimentos encerrados. A coluna Manual é para o dia
         em que a equipe não usou a Lista da vez — as duas somam.</p></div></div>
   </div></div>`;
+};
+
+/* ===================== tela: o dia (fila + lançamento) ===================== */
+telas.dia = () => {
+  const fech=D.at.filter(a=>a.fim);
+  const k=apura(D.vendas);
+  return `
+  <div class="head">
+    <div><h1>${labelDia(dia)} — ${esc(L().nome||'')}</h1>
+      <p>R$ ${brl(k.venda)} · ${k.tickets} ticket${k.tickets===1?'':'s'} · ${fech.length} atendimento${fech.length===1?'':'s'}
+      ${diaFechado()?' · <b>dia fechado</b>':''}</p></div>
+    <div class="spacer"></div>${selLoja()}${selData()}
+  </div>
+  ${telas.fila(false)}
+  <div style="height:8px"></div>
+  ${telas.lancar(false)}`;
 };
 
 /* ===================== tela: caixa (gestor) ===================== */
@@ -1948,7 +1986,7 @@ function partir(){
 /* ===================== tempo real ===================== */
 function ligarCanal(){
   if(canal) sb.removeChannel(canal);
-  const bate=p=>((p.new&&p.new.loja_id===loja)||(p.old&&p.old.loja_id===loja));
+  const bate=p=>((p.new&&p.new.loja_id===loja&&(!p.new.data||p.new.data===dia))||(p.old&&p.old.loja_id===loja&&(!p.old.data||p.old.data===dia)));
   canal = sb.channel('salao')
     .on('postgres_changes',{event:'*',schema:'public',table:'fila'},        p=>{ if(bate(p)) recarregar(); })
     .on('postgres_changes',{event:'*',schema:'public',table:'vendas'},      p=>{ if(bate(p)) recarregar(); })
