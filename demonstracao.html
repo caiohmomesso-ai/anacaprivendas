@@ -285,11 +285,12 @@ tr.tot td{font-weight:700;border-top:1px solid var(--line);border-bottom:0;backg
 /* ============ modo demonstração: banco falso, tudo na memória ============ */
 (function(){
   const DB={}; let seq=1;
+  const TETO=1000;   // o mesmo teto por resposta que o Supabase aplica
   const uid=()=>'d'+(seq++).toString(36).padStart(7,'0');
   const ok=d=>({data:d,error:null});
   const tbl=n=>DB[n]||(DB[n]=[]);
   function builder(nome){
-    const F=[]; let op='select',carga=null,conf=null,ord=null,lim=null,um=null;
+    const F=[]; let op='select',carga=null,conf=null,ord=[],lim=null,um=null,faixa=null;
     const api={}; const mais=f=>{F.push(f);return api;};
     api.select=()=>api;
     api.insert=v=>{op='insert';carga=v;return api;};
@@ -307,8 +308,12 @@ tr.tot td{font-weight:700;border-top:1px solid var(--line);border-bottom:0;backg
     api.ilike=(c,v)=>{const t=String(v).replace(/%/g,'').toUpperCase();
       return mais(r=>String(r[c]||'').toUpperCase().indexOf(t)>=0);};
     api.match=o=>{Object.keys(o).forEach(k=>mais(r=>r[k]===o[k]));return api;};
-    api.order=(c,o)=>{ord={c,asc:!o||o.ascending!==false};return api;};
+    // ordem por várias colunas, como o banco de verdade
+    api.order=(c,o)=>{ord.push({c,asc:!o||o.ascending!==false});return api;};
     api.limit=n=>{lim=n;return api;};
+    // o Supabase devolve no máximo mil linhas por resposta. A demonstração
+    // imita esse teto, senão ela esconde justamente o erro que ele causava.
+    api.range=(a,b)=>{faixa=[a,Math.min(b,a+TETO-1)];return api;};
     api.single=()=>{um=1;return api;};
     api.maybeSingle=()=>{um=1;return api;};
     api.then=(res,rej)=>Promise.resolve(roda()).then(res,rej);
@@ -316,8 +321,14 @@ tr.tot td{font-weight:700;border-top:1px solid var(--line);border-bottom:0;backg
     function roda(){
       let d;
       if(op==='select'){ d=filtra();
-        if(ord) d=d.slice().sort((a,b)=>{const x=a[ord.c],y=b[ord.c];return (x>y?1:x<y?-1:0)*(ord.asc?1:-1);});
-        if(lim) d=d.slice(0,lim);
+        if(ord.length) d=d.slice().sort((a,b)=>{
+          for(const o of ord){ const x=a[o.c],y=b[o.c];
+            if(x>y) return o.asc?1:-1; if(x<y) return o.asc?-1:1; }
+          return 0;
+        });
+        if(faixa) d=d.slice(faixa[0], faixa[1]+1);
+        else if(lim) d=d.slice(0, Math.min(lim,TETO));
+        else d=d.slice(0,TETO);
       } else if(op==='insert'){
         d=[].concat(carga).map(v=>Object.assign({id:uid(),criado_em:new Date().toISOString()},v));
         tbl(nome).push.apply(tbl(nome),d);
@@ -513,8 +524,8 @@ tr.tot td{font-weight:700;border-top:1px solid var(--line);border-bottom:0;backg
 /* ===================== configuração ===================== */
 /* Preencha as duas linhas abaixo, ou deixe como estão e configure pela
    própria tela de entrada — o endereço fica guardado no navegador.      */
-let SUPABASE_URL  = 'https://demonstracao.local';
-let SUPABASE_ANON = 'demonstracao';
+let SUPABASE_URL  = 'https://ruicopcszsjmyaeywecj.supabase.co';
+let SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ1aWNvcGNzenNqbXlhZXl3ZWNqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgxOTU1OTIsImV4cCI6MjEwMzc3MTU5Mn0.D4eqocvSQ52-cxVmuwDBMGOWc7tZJRdfAkpN5bePxoA';
 
 let sb=null;
 function guardado(k){ try{ return localStorage.getItem(k)||''; }catch(e){ return ''; } }
@@ -548,6 +559,8 @@ let M={vendas:[],at:[],mov:[],desp:[],am:[],esc:[]};
 let R={de:'',ate:'',vendas:[],at:[],mov:[],desp:[],am:[],reab:[],esc:[],carregado:false};
 let canal=null, tipoMov='sangria', pincel='I', verTudo=false, subP='visao';
 let mesCarregado='';   // evita reler o mesmo mês a cada troca de aba
+let mesEm=0;           // quando foi lido, para não ficar velho sem ninguém notar
+const VALIDADE=10*60*1000;
 let ARQ={mes:'', lido:false, dados:null, baixado:false};
 let IMP={tipo:'vendas', texto:'', linhas:[], erros:[], lido:false};
 let AC={tipo:'vencendo', dias:7, msg:null, lido:false};
@@ -594,16 +607,39 @@ async function carregarBase(){
   lojas=r[0].data||[]; pessoas=r[1].data||[]; motivos=r[2].data||[]; pausas=r[3].data||[];
   cats=(r[4]&&!r[4].error&&r[4].data)||[];
 }
+/* O banco devolve no máximo mil linhas por consulta, e não avisa quando corta.
+   Com as duas lojas juntas, novembro já passou disso: 1.059 vendas. O que
+   sobrava ficava de fora em silêncio, e eram sempre as linhas mais recentes —
+   por isso o painel mostrava 22 dias em vez de 24.
+   Daqui para frente toda consulta que pode crescer vem em páginas de mil,
+   até o banco acabar. A ordem é sempre explícita: sem ela o Postgres pode
+   devolver a mesma linha em duas páginas e esquecer outra. */
+const PAGINA=1000;
+async function tudo(montar, ordem){
+  const cols = ordem || ['id'];
+  const fora=[];
+  for(let ini=0; ; ini+=PAGINA){
+    let q=montar();
+    cols.forEach(c=>{ q=q.order(c); });
+    const r=await q.range(ini, ini+PAGINA-1);
+    if(r.error) return {data:null, error:r.error};
+    const lote=r.data||[];
+    fora.push(...lote);
+    if(lote.length<PAGINA) break;
+    if(fora.length>=200000) break;   // trava de segurança
+  }
+  return {data:fora, error:null};
+}
 async function carregarDia(){
   const f={loja_id:loja,data:dia};
   const r = await Promise.all([
     sb.from('dias').select('*').match(f).maybeSingle(),
-    sb.from('vendas').select('*').match(f).order('criado_em'),
-    sb.from('atendimentos').select('*').match(f).order('inicio'),
+    tudo(()=>sb.from('vendas').select('*').match(f).order('criado_em')),
+    tudo(()=>sb.from('atendimentos').select('*').match(f).order('inicio')),
     sb.from('fila').select('*').match(f),
-    sb.from('caixa_mov').select('*').match(f).order('criado_em'),
-    sb.from('atend_manual').select('*').match(f),
-    sb.from('reaberturas').select('*').match(f).order('criado_em')
+    tudo(()=>sb.from('caixa_mov').select('*').match(f).order('criado_em')),
+    tudo(()=>sb.from('atend_manual').select('*').match(f)),
+    tudo(()=>sb.from('reaberturas').select('*').match(f).order('criado_em'))
   ]);
   D={dia:r[0].data||null, vendas:r[1].data||[], at:r[2].data||[], fila:r[3].data||[],
      mov:r[4].data||[], am:r[5].data||[], reab:r[6].data||[]};
@@ -611,20 +647,20 @@ async function carregarDia(){
 }
 async function carregarMes(forcar){
   const assinatura = mesPainel+'|'+(varias()?'todas':eu.loja_id);
-  if(!forcar && mesCarregado===assinatura) return;
+  if(!forcar && mesCarregado===assinatura && Date.now()-mesEm<VALIDADE) return;
   const de=mesPainel+'-01', ate=fimDoMes(mesPainel);
   const alvo = varias() ? lojas.map(x=>x.id) : [eu.loja_id];
+  const p=t=>tudo(()=>sb.from(t).select('*').in('loja_id',alvo).gte('data',de).lte('data',ate));
   const r = await Promise.all([
-    sb.from('vendas').select('*').in('loja_id',alvo).gte('data',de).lte('data',ate),
-    sb.from('atendimentos').select('*').in('loja_id',alvo).gte('data',de).lte('data',ate),
-    sb.from('caixa_mov').select('*').in('loja_id',alvo).gte('data',de).lte('data',ate),
-    sb.from('despesas').select('*').in('loja_id',alvo).gte('data',de).lte('data',ate).order('data'),
-    sb.from('atend_manual').select('*').in('loja_id',alvo).gte('data',de).lte('data',ate),
-    sb.from('escala').select('*').in('loja_id',alvo).gte('data',de).lte('data',ate)
+    p('vendas'), p('atendimentos'), p('caixa_mov'),
+    tudo(()=>sb.from('despesas').select('*').in('loja_id',alvo).gte('data',de).lte('data',ate),['data','id']),
+    p('atend_manual'), p('escala')
   ]);
+  const err=r.find(x=>x.error);
+  if(err){ erro(err.error); return; }
   M={vendas:r[0].data||[], at:r[1].data||[], mov:r[2].data||[], desp:r[3].data||[],
      am:r[4].data||[], esc:r[5].data||[]};
-  mesCarregado=assinatura;
+  mesCarregado=assinatura; mesEm=Date.now();
 }
 async function garantirFila(){
   const falta=equipe(loja).filter(v=>!D.fila.some(f=>f.vendedora===v.nome));
@@ -637,15 +673,11 @@ async function garantirFila(){
 async function recarregar(){ await carregarDia(); render(); }
 async function carregarPeriodo(){
   const alvo = varias() ? lojas.map(x=>x.id) : [eu.loja_id];
-  const f=q=>q.in('loja_id',alvo).gte('data',R.de).lte('data',R.ate);
+  const p=(t,ordem)=>tudo(()=>sb.from(t).select('*')
+    .in('loja_id',alvo).gte('data',R.de).lte('data',R.ate), ordem);
   const r=await Promise.all([
-    f(sb.from('vendas').select('*')),
-    f(sb.from('atendimentos').select('*')),
-    f(sb.from('caixa_mov').select('*')),
-    f(sb.from('despesas').select('*')),
-    f(sb.from('atend_manual').select('*')),
-    f(sb.from('reaberturas').select('*')),
-    f(sb.from('escala').select('*'))
+    p('vendas'), p('atendimentos'), p('caixa_mov'),
+    p('despesas',['data','id']), p('atend_manual'), p('reaberturas'), p('escala')
   ]);
   const err=r.find(x=>x.error);
   if(err){ erro(err.error); return false; }
@@ -771,12 +803,13 @@ async function carregarBonus(){
   const alvo = varias() ? lojas.map(x=>x.id) : [eu.loja_id];
   const h=hoje();
   const r=await Promise.all([
-    sb.from('bonus').select('*').in('loja_id',alvo)
-      .gte('data', mesPainel+'-01').lte('data', fimDoMes(mesPainel)).limit(1500),
-    sb.from('bonus').select('*').in('loja_id',alvo)
-      .is('resgatado_em',null).gte('vence_em',h).limit(1500)
+    tudo(()=>sb.from('bonus').select('*').in('loja_id',alvo)
+      .gte('data', mesPainel+'-01').lte('data', fimDoMes(mesPainel))),
+    tudo(()=>sb.from('bonus').select('*').in('loja_id',alvo)
+      .is('resgatado_em',null).gte('vence_em',h))
   ]);
-  if(r[0].error){ erro(r[0].error); return false; }
+  const errB=r.find(x=>x.error);
+  if(errB){ erro(errB.error); return false; }
   B.bonus = juntarPorId((r[0].data||[]).concat(r[1].data||[]));
   await carregarClientesDe(B.bonus);
   B.carregado=true;
@@ -1800,12 +1833,15 @@ const ACOES={
 async function carregarSegmento(){
   const alvo = varias() ? lojas.map(x=>x.id) : [eu.loja_id];
   const h=hoje(), d=+AC.dias||0;
-  let q=sb.from('bonus').select('*').in('loja_id',alvo);
-  if(AC.tipo==='vencendo')        q=q.is('resgatado_em',null).gte('vence_em',h).lte('vence_em',maisDias(h,d||7));
-  else if(AC.tipo==='disponivel') q=q.is('resgatado_em',null).gte('vence_em',h).lte('libera_em',h);
-  else if(AC.tipo==='perdidos')   q=q.is('resgatado_em',null).lt('vence_em',h).gte('vence_em',maisDias(h,-(d||90)));
-  else                            q=q.gte('data', maisDias(h,-365));
-  const r=await q.limit(3000);
+  const montar=()=>{
+    let q=sb.from('bonus').select('*').in('loja_id',alvo);
+    if(AC.tipo==='vencendo')        q=q.is('resgatado_em',null).gte('vence_em',h).lte('vence_em',maisDias(h,d||7));
+    else if(AC.tipo==='disponivel') q=q.is('resgatado_em',null).gte('vence_em',h).lte('libera_em',h);
+    else if(AC.tipo==='perdidos')   q=q.is('resgatado_em',null).lt('vence_em',h).gte('vence_em',maisDias(h,-(d||90)));
+    else                            q=q.gte('data', maisDias(h,-365));
+    return q;
+  };
+  const r=await tudo(montar);
   if(r.error){ erro(r.error); return false; }
   B.bonus=juntarPorId(r.data||[], B.bonus);
   await carregarClientesDe(r.data||[]);
@@ -1899,7 +1935,10 @@ async function lerArquivo(){
   const alvo = varias() ? lojas.map(x=>x.id) : [eu.loja_id];
   const out={};
   for(const [t,,] of TABELAS_ARQ){
-    const r=await sb.from(t).select('*').in('loja_id',alvo).gte('data',de).lte('data',ate).limit(20000);
+    // fila não tem id: a chave dela é loja + data + vendedora
+    const ordem = t==='fila' ? ['loja_id','data','vendedora'] : ['id'];
+    const r=await tudo(()=>sb.from(t).select('*')
+      .in('loja_id',alvo).gte('data',de).lte('data',ate), ordem);
     if(r.error){ erro(r.error); return false; }
     out[t]=r.data||[];
   }
@@ -2005,7 +2044,9 @@ const painelVisao = () => {
   const porM={}; perdas.forEach(p=>{const m=p.motivo||'—';porM[m]=(porM[m]||0)+1;});
   return `
   <div class="head"><div><h1>Visão geral de ${labelMes(mesPainel)}</h1>
-    <p>${dias.length} dia${dias.length===1?'':'s'} com venda · ${k.tickets} tickets · ${at.length} atendimentos</p></div>
+    <p>${dias.length} dia${dias.length===1?'':'s'} com venda · ${k.tickets} tickets · ${at.length} atendimentos
+    <span style="color:var(--muted)">· lido ${hhmm(mesEm)}</span>
+    <button class="lk" id="reler">atualizar</button></p></div>
     <div class="spacer"></div>${selLoja()}${selMes()}</div>
   ${!vd.length?`<div class="card"><div class="empty"><b>Nenhum lançamento em ${labelMes(mesPainel)}</b>Comece pela Lista da vez.</div></div>`:`
   <div class="kpis" style="margin-bottom:14px">
@@ -2666,6 +2707,7 @@ document.addEventListener('click', async e=>{
   const t=e.target;
   const nb=t.closest('.navb'); if(nb) return nav(nb.dataset.nav);
   if(t.id==='sair'||t.id==='sair2'){ await sb.auth.signOut(); location.reload(); return; }
+  if(t.id==='reler'){ await carregarMes(true); render(); toast('Painel atualizado'); return; }
   if(t.dataset.sub){
     subP=t.dataset.sub;
     if(subP==='relatorio'&&!R.de){ R.ate=hoje(); R.de=hoje().slice(0,8)+'01'; }
@@ -3303,11 +3345,30 @@ function partir(){
 // O tempo real já traz a linha alterada. Aplicar ela direto custa zero leitura;
 // reler o dia inteiro custava cinco consultas por mudança, em cada aparelho aberto.
 const DESTINO={fila:'fila', vendas:'vendas', atendimentos:'at', caixa_mov:'mov'};
+// O painel guarda o mês inteiro em memória para não reler o banco a cada troca
+// de aba. Só que nada envelhecia esse cache: uma aba aberta de manhã seguia
+// mostrando o mês como estava naquela hora, por dias. Era isso que fazia o
+// painel falar em 22 dias no dia 25. Agora qualquer gravação nessas tabelas
+// marca o mês para reler, e se o painel estiver na tela ele se refaz na hora.
+const NO_MES={vendas:1, atendimentos:1, caixa_mov:1, atend_manual:1, despesas:1, escala:1};
+const TELAS_MES=['painel','despesas','meu','escala'];
+let relerMes=0;   // junta uma rajada de vendas numa única releitura
 function aplicarMudanca(tabela, p){
-  const campo=DESTINO[tabela]; if(!campo) return;
-  const arr=D[campo]; if(!arr) return;
   const linha=p.new&&Object.keys(p.new).length?p.new:null;
   const velha=p.old&&Object.keys(p.old).length?p.old:null;
+  if(NO_MES[tabela]){
+    const d=(linha&&linha.data)||(velha&&velha.data)||'';
+    if(String(d).slice(0,7)===mesPainel){
+      mesCarregado='';
+      if(TELAS_MES.indexOf(atual)>=0){
+        clearTimeout(relerMes);
+        relerMes=setTimeout(()=>carregarMes()
+          .then(()=>{ if(!MD.classList.contains('on')) render(); }), 1200);
+      }
+    }
+  }
+  const campo=DESTINO[tabela]; if(!campo) return;
+  const arr=D[campo]; if(!arr) return;
   const mesma = tabela==='fila'
     ? (x,y)=>x.vendedora===y.vendedora
     : (x,y)=>x.id===y.id;
