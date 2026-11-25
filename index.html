@@ -100,6 +100,13 @@ tr.tot td{font-weight:700;border-top:1px solid var(--line);border-bottom:0;backg
 .note{font-size:12.5px;color:var(--muted);margin-top:9px}
 .lk{background:none;border:0;padding:0 0 0 6px;font:inherit;color:var(--marca);
     text-decoration:underline;cursor:pointer}
+/* uma linha da lista de follow-up: no celular os botões caem para baixo */
+.fupr{display:flex;gap:11px;align-items:center;padding:11px 15px;
+      border-top:1px solid var(--line2);flex-wrap:wrap}
+.fupb{display:flex;gap:6px;flex-wrap:wrap}
+.fupb .btn{white-space:nowrap;text-decoration:none;display:inline-flex;
+           align-items:center;justify-content:center}
+@media(max-width:620px){ .fupr{align-items:flex-start} .fupb{width:100%} .fupb .btn{flex:1} }
 
 .subnav{display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--line);
   overflow-x:auto;scrollbar-width:none}
@@ -286,7 +293,8 @@ function conectar(){
 }
 
 const PAG=['DEBITO','CREDITO AV','CREDITO X','DINHEIRO','PIX','LINK ZZNET','OUTROS'];
-const CAN=['LOJA','ONLINE','WHATSAPP'];
+const CAN=['LOJA','WHATSAPP','INSTAGRAM','ONLINE'];
+const CAN_DIG=['WHATSAPP','INSTAGRAM'];
 const DEST=['COFRE','DEPÓSITO BANCÁRIO','PAGAMENTO DE DESPESA','TROCO PARA OUTRO CAIXA','ENTREGA AO PROPRIETÁRIO','OUTROS'];
 const MES=['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez'];
 const SEM=['D','S','T','Q','Q','S','S'];
@@ -349,6 +357,9 @@ async function carregarBase(){
   if(r[0].error) throw r[0].error;
   lojas=r[0].data||[]; pessoas=r[1].data||[]; motivos=r[2].data||[]; pausas=r[3].data||[];
   cats=(r[4]&&!r[4].error&&r[4].data)||[];
+  // o banco devolve todas as colunas, inclusive as vazias: a presença da
+  // chave diz se o digital.sql já rodou
+  TEM_DIGITAL = !!(lojas[0] && 'aba_digital' in lojas[0]);
 }
 /* O banco devolve no máximo mil linhas por consulta, e não avisa quando corta.
    Com as duas lojas juntas, novembro já passou disso: 1.059 vendas. O que
@@ -734,11 +745,20 @@ async function encerrarAt(nome,dados,venda){
 
 /* ===================== navegação ===================== */
 const telas={};
-const NAV_G=[['dia','O dia'],['caixa','Caixa'],['escala','Escala'],['bonus','Bônus'],['painel','Painel'],['despesas','Despesas'],['ajustes','Ajustes']];
+const NAV_G=[['dia','O dia'],['caixa','Caixa'],['digital','Digital'],['escala','Escala'],['bonus','Bônus'],['painel','Painel'],['despesas','Despesas'],['ajustes','Ajustes']];
 const SUB_P=[['visao','Visão geral'],['perdas','Perdas'],['relatorio','Relatório'],['equipe','Equipe']];
 const NAV_V=[['fila','Minha vez'],['bonus','Bônus'],['sangria','Sangria'],['meu','Meu painel']];
 const NAV_T=NAV_G.filter(m=>m[0]!=='ajustes');
-const menus=()=>eu.papel==='tablet'?NAV_T:(gestor()?NAV_G:NAV_V);
+// A aba Digital é opcional para as vendedoras: o dono liga e desliga por loja
+// nos Ajustes. Gerente, tablet e dono sempre veem.
+const menus=()=>{
+  const tira=m=>temDigital()?m:m.filter(x=>x[0]!=='digital');
+  if(eu.papel==='tablet') return tira(NAV_T);
+  if(gestor()) return tira(NAV_G);
+  return (temDigital() && L().aba_digital)
+    ? [NAV_V[0], ['digital','Digital']].concat(NAV_V.slice(1))
+    : NAV_V;
+};
 
 function render(){
   if(!menus().some(m=>m[0]===atual)) atual=menus()[0][0];
@@ -753,6 +773,7 @@ function render(){
 async function nav(t){
   atual=t;
   if(['painel','despesas','meu','escala'].indexOf(t)>=0) await carregarMes();
+  if(t==='digital'){ await carregarDigital(); }
   if(t==='bonus'&&!B.carregado) await carregarBonus();
   if(t==='bonus'&&B.carregado&&B.mes!==mesPainel){ B.mes=mesPainel; await carregarBonus(); }
   if(t==='relatorio'&&!R.de){ R.ate=hoje(); R.de=hoje().slice(0,8)+'01'; }
@@ -917,7 +938,8 @@ function detFim(){
       <div id="m_extra" style="display:none;display:grid;gap:11px">
         <div class="two">
           <div class="fld"><label>Boleta</label><input id="m_bol" inputmode="numeric" placeholder="17310"></div>
-          <div class="fld"><label>Canal</label><select id="m_can">${CAN.map(c=>`<option>${c}</option>`).join('')}</select></div>
+          <div class="fld"><label>Canal</label><select id="m_can">${CAN.map(c=>
+            `<option ${ctx.digital&&c===G.canal?'selected':''}>${c}</option>`).join('')}</select></div>
         </div>
         <div class="two">
           <div class="fld"><label>Bolsas</label><input id="m_b" type="number" min="0" value="0"></div>
@@ -937,7 +959,12 @@ function detFim(){
       ${m&&m.exige_sku?`<div class="two">
         <div class="fld"><label>SKU procurado</label><input id="m_sku" placeholder="1234567-01 34"></div>
         <div class="fld"><label>Valor R$</label><input id="m_val" inputmode="decimal" placeholder="279,90"></div>
-      </div><p class="note" style="margin:0">Isso vira o relatório de demanda reprimida.</p>`:''}`;
+      </div><p class="note" style="margin:0">Isso vira o relatório de demanda reprimida.</p>`:''}
+      ${(ctx.digital||!temDigital())?'':`<div class="two" style="margin-top:11px">
+        <div class="fld"><label>Nome da cliente</label><input id="m_fnome" placeholder="MARIA"></div>
+        <div class="fld"><label>WhatsApp</label><input id="m_ftel" inputmode="tel" placeholder="17 99999-9999"></div>
+      </div>
+      <p class="note" style="margin:0">Sem o contato não existe follow-up: a peça chega e não há para quem avisar.</p>`}`;
     ok.disabled=!ctx.motivo;
   }
 }
@@ -1556,6 +1583,151 @@ async function gravarImport(){
   render();
 }
 
+
+
+/* ===================== atendimento digital e follow-up =====================
+   O digital tem dois lados. Um é registrar o atendimento que chegou por
+   WhatsApp ou Instagram, para ele contar na conversão como qualquer outro.
+   O outro é o follow-up: a lista de quem a equipe precisa chamar hoje.
+
+   Essa lista não fica guardada. Ela é calculada na hora a partir do que já
+   existe — a peça que faltou, o bônus que vence, a compra de três dias atrás.
+   No banco fica só o contato que foi feito, em `followups`. Assim nada
+   desencontra e a tabela não cresce com itens que ninguém atendeu.         */
+const G={pl:[], perdidos:[], fup:[], bn:[], carregado:false,
+         filtro:'todos', canal:'WHATSAPP', aberto:null};
+// O digital só existe depois que o digital.sql roda no banco. Enquanto não
+// rodar, o sistema segue como antes: a aba não aparece e os campos novos não
+// são gravados. Assim dá para publicar o site antes do SQL sem quebrar o
+// encerramento de atendimento.
+let TEM_DIGITAL=false;
+const temDigital=()=>TEM_DIGITAL;
+const TIPOS_FUP=[
+  ['CHEGOU',   'Peça que faltou', 'O sistema não sabe se a peça chegou — chame quando chegar, ou descarte.'],
+  ['VENCENDO', 'Bônus vencendo',  'Perde o bônus nos próximos sete dias.'],
+  ['POSVENDA', 'Pós-venda',       'Comprou de dois a sete dias atrás e já tem bônus liberado.'],
+  ['SUMIDA',   'Cliente sumida',  'Não compra há mais tempo que o limite dos Ajustes.']
+];
+const DICA_FUP=t=>(TIPOS_FUP.find(x=>x[0]===t)||[0,0,''])[2];
+const ROT_FUP=t=>(TIPOS_FUP.find(x=>x[0]===t)||[0,t])[1];
+const MSG_FUP={
+  CHEGOU:'Oi {nome}! Chegou aqui o {sku} que você procurou. Separei para você dar uma olhada — quer que eu guarde?',
+  VENCENDO:'Oi {nome}! Passando para lembrar que você tem R$ {valor} de bônus e ele vence dia {vence}. Vale em compras a partir de R$ {minimo}. Te espero!',
+  POSVENDA:'Oi {nome}! Tudo bem? Queria saber como você está se dando com a compra. Ah, e você tem R$ {valor} de bônus liberado para usar até {vence}.',
+  SUMIDA:'Oi {nome}! Faz um tempo que você não aparece — sua última compra foi em {ultima}. Chegou coleção nova, queria te mostrar.'
+};
+const diasEntre=(a,b)=>Math.round((new Date(b+'T12:00:00')-new Date(a+'T12:00:00'))/86400000);
+// o wa.me quer só dígitos, com o 55 na frente
+function linkWa(tel, texto){
+  let d=String(tel||'').replace(/\D/g,'');
+  if(d.length<=11) d='55'+d;
+  return 'https://wa.me/'+d+'?text='+encodeURIComponent(texto);
+}
+function textoFup(s){
+  const r=regras();
+  return (MSG_FUP[s.tipo]||'Oi {nome}!')
+    .replace('{nome}', (s.nome||'').split(' ')[0]||'tudo bem')
+    .replace('{sku}', s.sku||'o modelo')
+    .replace('{valor}', brl(s.valor||0))
+    .replace('{vence}', s.vence?labelDia(s.vence):'')
+    .replace('{minimo}', brl((s.valor||0)*r.mult))
+    .replace('{ultima}', s.ultima?labelDia(s.ultima):'');
+}
+
+async function carregarDigital(forcar){
+  if(!forcar && G.carregado) return true;
+  const alvo = varias() ? lojas.map(x=>x.id) : [eu.loja_id];
+  const h=hoje();
+  const r=await Promise.all([
+    sb.from('plantao').select('*').in('loja_id',alvo).eq('data',dia),
+    // perdas com contato dos últimos 60 dias: é delas que sai o "chegou a peça"
+    tudo(()=>sb.from('atendimentos').select('*').in('loja_id',alvo)
+      .eq('vendeu',false).gte('data',maisDias(h,-60))),
+    tudo(()=>sb.from('followups').select('*').in('loja_id',alvo).gte('data',maisDias(h,-120))),
+    tudo(()=>sb.from('bonus').select('*').in('loja_id',alvo).gte('data',maisDias(h,-365)))
+  ]);
+  const err=r.find(x=>x.error); if(err){ erro(err.error); return false; }
+  G.pl=r[0].data||[];
+  G.perdidos=(r[1].data||[]).filter(a=>a.telefone);
+  G.fup=r[2].data||[];
+  G.bn=r[3].data||[];
+  await carregarClientesDe(G.bn);
+  G.carregado=true;
+  return true;
+}
+
+const plantaoDe=(lj,dt)=>(G.pl.find(p=>p.loja_id===lj&&p.data===dt)||{}).vendedora||'';
+
+/* A lista do dia. Um item sai dela assim que alguém registra contato —
+   com uma carência por tipo, para a mesma cliente não ser chamada toda
+   semana pelo mesmo motivo. */
+const CARENCIA={CHEGOU:9999, VENCENDO:7, POSVENDA:9999, SUMIDA:45};
+function sugestoesFup(){
+  const h=hoje(), lj=loja, r=regras(), out=[];
+  // descartar é para sempre; os outros resultados têm carência por tipo,
+  // para a mesma cliente não ser chamada toda semana pelo mesmo motivo
+  const jaFalou=(tipo,chave)=>G.fup.some(f=>f.loja_id===lj && f.tipo===tipo && f.chave===chave
+    && (f.resultado==='NAO_QUER' || diasEntre(f.data,h) <= (CARENCIA[tipo]||30)));
+
+  // 1. a peça que faltou. Só entra se tem SKU e telefone.
+  G.perdidos.filter(a=>a.loja_id===lj && a.sku && a.telefone).forEach(a=>{
+    if(jaFalou('CHEGOU',a.id)) return;
+    out.push({tipo:'CHEGOU', chave:a.id, nome:a.nome||'Cliente', tel:a.telefone,
+      sku:a.sku, valor:+a.valor||0, cliente_id:null,
+      detalhe:'Procurou '+a.sku+' em '+labelDia(a.data)+' com '+a.vendedora,
+      peso:diasEntre(a.data,h)});
+  });
+
+  // 2 e 3. o que vem dos bônus
+  const meus=G.bn.filter(b=>b.loja_id===lj);
+  const ultima={};   // última compra de cada cliente, para o "sumida"
+  meus.forEach(b=>{ if(!ultima[b.cliente_id]||b.data>ultima[b.cliente_id]) ultima[b.cliente_id]=b.data; });
+
+  meus.forEach(b=>{
+    const c=B.clientes.find(x=>x.id===b.cliente_id);
+    if(!c||!c.telefone) return;
+    const base={nome:c.nome, tel:c.telefone, cliente_id:c.id,
+                valor:+b.valor_bonus||0, vence:b.vence_em};
+    const faltam=diasEntre(h,b.vence_em), idade=diasEntre(b.data,h);
+    if(!b.resgatado_em && faltam>=0 && faltam<=7 && !jaFalou('VENCENDO',b.id)){
+      out.push(Object.assign({tipo:'VENCENDO', chave:b.id, peso:faltam,
+        detalhe:'R$ '+brl(base.valor)+' vence '+(faltam===0?'hoje':'em '+faltam+' dia'+(faltam===1?'':'s'))
+          +' · usa a partir de R$ '+brl(base.valor*r.mult)}, base));
+    } else if(idade>=2 && idade<=7 && !jaFalou('POSVENDA',b.id)){
+      out.push(Object.assign({tipo:'POSVENDA', chave:b.id, peso:idade,
+        detalhe:'Comprou há '+idade+' dias'+(b.boleta?' (boleta '+b.boleta+')':'')
+          +' · R$ '+brl(base.valor)+' de bônus'}, base));
+    }
+  });
+
+  // 4. quem não aparece há muito tempo. Uma linha por cliente, não por bônus.
+  const limite=+(L().fup_sumida||60);
+  Object.keys(ultima).forEach(cid=>{
+    const dd=diasEntre(ultima[cid],h);
+    if(dd<limite) return;
+    const c=B.clientes.find(x=>x.id===cid);
+    if(!c||!c.telefone) return;
+    if(jaFalou('SUMIDA',cid)) return;
+    out.push({tipo:'SUMIDA', chave:cid, nome:c.nome, tel:c.telefone, cliente_id:c.id,
+      ultima:ultima[cid], valor:0,
+      detalhe:'Última compra em '+labelDia(ultima[cid])+' — '+dd+' dias', peso:-dd});
+  });
+
+  return out.sort((a,b)=>a.peso-b.peso);
+}
+
+async function registrarFup(s, resultado, obs){
+  const r=await sb.from('followups').insert({loja_id:loja, data:hoje(), tipo:s.tipo,
+    chave:s.chave, cliente_id:s.cliente_id||null, nome:s.nome||null, telefone:s.tel||null,
+    resultado, obs:obs||null, quem:eu.nome}).select().single();
+  if(r.error) return erro(r.error);
+  G.fup.push(r.data);
+  render();
+  toast(resultado==='VENDEU' ? 'Ótimo! Lance a venda aqui mesmo, em Registrar atendimento digital'
+      : resultado==='SEM_RESPOSTA' ? 'Marcado como sem resposta — volta na lista depois'
+      : resultado==='NAO_QUER' ? 'Descartado — não volta mais'
+      : 'Contato registrado');
+}
 
 /* ===================== ações de CRM ===================== */
 const ACOES={
@@ -2324,6 +2496,153 @@ telas.despesas = () => {
 };
 
 /* ===================== tela: ajustes ===================== */
+
+/* ===================== tela: digital ===================== */
+telas.digital = () => {
+  const lj=loja, h=hoje(), pl=plantaoDe(lj,dia);
+  const eq=equipe(lj), nomes=[gerenteDa(lj)].concat(eq.map(v=>v.nome));
+  const digAt=D.at.filter(a=>a.loja_id===lj&&a.canal&&a.canal!=='LOJA');
+  const digVd=D.vendas.filter(v=>v.loja_id===lj&&v.canal&&v.canal!=='LOJA');
+  const fatDig=digVd.reduce((a,b)=>a+ +b.total,0);
+  const convDig=digAt.filter(a=>a.fim).length
+    ? digAt.filter(a=>a.vendeu).length/digAt.filter(a=>a.fim).length*100 : 0;
+  const sug=sugestoesFup();
+  G.lista=G.filtro==='todos'?sug:sug.filter(s=>s.tipo===G.filtro);
+  const conta=t=>sug.filter(s=>s.tipo===t).length;
+  const feitos=G.fup.filter(f=>f.loja_id===lj&&f.data===h);
+  const abre=L().hora_abre==null?10:L().hora_abre, fecha=L().hora_fecha==null?22:L().hora_fecha;
+  const agora=new Date().getHours();
+  const noAr=agora>=abre&&agora<fecha;
+
+  return `
+  <div class="head"><div><h1>Digital</h1>
+    <p>Atendimento por WhatsApp e Instagram, e a lista de quem chamar hoje.</p></div>
+    <div class="spacer"></div>${selLoja()}${selData()}</div>
+
+  <div class="recon ${noAr?'ok':'off'}" style="margin-bottom:14px">
+    <div><span class="lbl">Plantão de ${labelDia(dia)}</span><br>
+      <b>${pl?esc(pl):'ninguém definido'}</b></div>
+    <div><span class="lbl">Atendimentos digitais</span><br><b class="num">${digAt.length}</b></div>
+    <div><span class="lbl">Vendas</span><br><b class="num">${digVd.length}</b></div>
+    <div><span class="lbl">Faturamento</span><br><b class="num">R$ ${brl0(fatDig)}</b></div>
+    <div><span class="lbl">Conversão</span><br><b class="num">${dec(convDig,0)}%</b></div>
+    <div class="spacer"></div>
+    <div style="text-align:right"><span class="lbl">${noAr
+      ?'dentro do horário ('+abre+'h às '+fecha+'h)'
+      :'fora do horário — atende das '+abre+'h às '+fecha+'h'}</span></div>
+  </div>
+
+  ${opera()?`<div class="card" style="margin-bottom:14px"><h3>Quem fica no plantão</h3><div class="pad">
+    <div class="entry" style="grid-template-columns:1fr auto">
+      <div class="fld"><label>Responsável pelo digital em ${labelDia(dia)}</label>
+        <select id="pl_sel"><option value="">— ninguém —</option>
+        ${nomes.map(n=>`<option ${n===pl?'selected':''}>${esc(n)}</option>`).join('')}</select></div>
+      <button class="btn gh" id="pl_ok" style="align-self:end">Definir</button>
+    </div>
+    <p class="note" style="margin:8px 0 0">Quem está de plantão responde as mensagens do dia e fica com
+      a venda digital. Sem plantão definido, a venda fica com quem lançar.</p>
+  </div></div>`:''}
+
+  <div class="card" style="margin-bottom:14px"><h3>Registrar atendimento digital</h3><div class="pad">
+    <div class="chips">${(opera()?nomes:[eu.nome]).map(n=>
+      `<button data-dig="${esc(n)}" ${n===pl?'style="border-color:var(--marca);color:var(--marca)"':''}>${esc(n)}</button>`).join('')}</div>
+    <p class="note" style="margin:9px 0 0">${opera()
+      ?'Clique em quem atendeu. O atendimento entra na conversão igual ao da loja, e a venda sai marcada pelo canal.'
+      :'O atendimento entra na sua conversão igual ao da loja, e a venda sai marcada pelo canal.'}</p>
+  </div></div>
+
+  <div class="card" style="margin-bottom:14px">
+    <h3>Follow-up de hoje${sug.length?` — ${sug.length} para chamar`:''}</h3>
+    <div class="pad" style="padding-bottom:0">
+      <div class="seg" style="flex-wrap:wrap">
+        <button data-fup="todos" class="${G.filtro==='todos'?'on':''}">Todos ${sug.length}</button>
+        ${TIPOS_FUP.map(t=>conta(t[0])
+          ?`<button data-fup="${t[0]}" class="${G.filtro===t[0]?'on':''}">${t[1]} ${conta(t[0])}</button>`
+          :'').join('')}
+      </div>
+      ${G.filtro!=='todos'?`<p class="note" style="margin:9px 0 0">${DICA_FUP(G.filtro)}</p>`:''}
+    </div>
+    ${G.lista.length?G.lista.slice(0,60).map((s,i)=>`
+      <div class="fupr">
+        <div style="flex:1;min-width:0">
+          <b>${esc(s.nome)}</b> <span class="tag ${s.tipo==='VENCENDO'?'w':s.tipo==='CHEGOU'?'k':''}">${ROT_FUP(s.tipo)}</span>
+          <div style="color:var(--muted);font-size:12.5px;margin-top:2px">${esc(s.detalhe)}</div>
+        </div>
+        <div class="fupb">
+          <a class="btn sm" target="_blank" rel="noopener"
+             href="${linkWa(s.tel, textoFup(s))}">WhatsApp</a>
+          <button class="btn gh sm" data-ffez="${i}">Falei</button>
+          <button class="btn gh sm" data-fsem="${i}">Sem resposta</button>
+          <button class="btn gh sm" data-fdes="${i}" title="Tirar da lista de vez">Descartar</button>
+        </div>
+      </div>`).join('')
+      +(G.lista.length>60?`<div class="pad" style="color:var(--muted)">… e mais ${G.lista.length-60}. Chame esses primeiro.</div>`:'')
+    :`<div class="empty"><b>Nada para chamar agora</b>${
+      G.carregado?'Conforme as vendas e os bônus forem entrando, a lista se enche sozinha.'
+                 :'Carregando…'}</div>`}
+  </div>
+
+  ${feitos.length?`<div class="card" style="margin-bottom:14px"><h3>Já falamos hoje — ${feitos.length}</h3>
+    <table><thead><tr><th>Cliente</th><th style="width:130px">Motivo</th>
+      <th style="width:120px">Resultado</th><th style="width:110px">Quem</th></tr></thead>
+      <tbody>${feitos.slice().reverse().map(f=>`<tr>
+        <td>${esc(f.nome||'—')}</td><td>${ROT_FUP(f.tipo)}</td>
+        <td><span class="tag ${f.resultado==='VENDEU'?'g':f.resultado==='SEM_RESPOSTA'?'w':''}">${
+          {FALEI:'Falei',SEM_RESPOSTA:'Sem resposta',VENDEU:'Vendeu',NAO_QUER:'Não quer'}[f.resultado]||f.resultado}</span></td>
+        <td>${esc(f.quem)}</td></tr>`).join('')}</tbody></table></div>`:''}
+
+  ${digAt.length?`<div class="card"><h3>Atendimentos digitais de ${labelDia(dia)}</h3>
+    <table><thead><tr><th>Quem atendeu</th><th style="width:110px">Canal</th><th>Cliente</th>
+      <th style="width:100px">Resultado</th><th style="width:120px">Motivo</th>
+      <th class="r" style="width:110px">Valor</th><th style="width:46px"></th></tr></thead>
+      <tbody>${digAt.slice().reverse().map(a=>`<tr>
+        <td>${esc(a.vendedora)}</td><td><span class="tag">${esc(a.canal)}</span></td>
+        <td>${esc(a.nome||'—')}${a.telefone?' · '+esc(a.telefone):''}</td>
+        <td>${a.vendeu?'<span class="tag g">Vendeu</span>':a.fim?'<span class="tag w">Não vendeu</span>':'—'}</td>
+        <td style="color:var(--muted)">${esc(a.motivo||'')}</td>
+        <td class="r num">${a.valor?brl(a.valor):''}</td>
+        <td class="r">${opera()?`<button class="del" data-rmdg="${a.id}">×</button>`:''}</td></tr>`).join('')}
+      </tbody></table></div>`:''}`;
+};
+
+function modalDigital(nome){
+  ctx={nome, vendeu:null, motivo:'', digital:true};
+  abrir(`<h4>Atendimento digital — ${esc(nome)}</h4><div class="bd">
+    <div class="seg" style="margin-bottom:12px">${CAN_DIG.map(c=>
+      `<button data-dcan="${c}" class="${G.canal===c?'on':''}">${c==='WHATSAPP'?'WhatsApp':'Instagram'}</button>`).join('')}</div>
+    <div class="two" style="margin-bottom:12px">
+      <div class="fld"><label>Nome da cliente</label><input id="d_nome" placeholder="MARIA"></div>
+      <div class="fld"><label>WhatsApp</label><input id="d_tel" inputmode="tel" placeholder="17 99999-9999"></div>
+    </div>
+    <div class="pick"><button class="s" data-v="1">Vendeu</button><button class="n" data-v="0">Não vendeu</button></div>
+    <div id="det"></div></div>
+    <div class="ft"><button class="btn gh" data-x="1">Cancelar</button>
+      <button class="btn" id="okfim" disabled>Salvar</button></div>`);
+}
+
+// O digital não passa pela fila: o atendimento nasce já encerrado, com o
+// canal e o contato da cliente, e a venda sai amarrada nele.
+async function lancarDigital(nome, dados, venda){
+  const agora=new Date().toISOString();
+  const base={loja_id:loja, data:dia, vendedora:nome, canal:G.canal,
+              inicio:agora, fim:agora};
+  const r0=await sb.from('atendimentos').insert(Object.assign(base,dados)).select().single();
+  if(r0.error) return erro(r0.error);
+  D.at.push(r0.data);
+  if(venda&&venda.length){
+    const linhas=venda.map(v=>Object.assign({loja_id:loja, data:dia,
+      atendimento_id:r0.data.id, origem:'digital'}, v));
+    const rv=await sb.from('vendas').insert(linhas).select();
+    if(rv.error) return erro(rv.error);
+    D.vendas.push(...rv.data);
+    toast('Venda digital de R$ '+brl(dados.valor)+' lançada para '+nome);
+  } else {
+    toast('Atendimento digital registrado');
+  }
+  mesCarregado='';
+  render();
+}
+
 telas.ajustes = () => {
   const alvo = varias()?lojas:lojas.filter(x=>x.id===eu.loja_id);
   return `
@@ -2401,7 +2720,16 @@ telas.ajustes = () => {
       <div class="fld"><label>Resgate exige compra de</label><input class="num" data-lj="${lo.id}.cb_multiplo" value="${lo.cb_multiplo==null?3:lo.cb_multiplo}"></div>
       <div class="fld"><label>Atendimento digital abre</label><input class="num" data-lj="${lo.id}.hora_abre" value="${lo.hora_abre==null?10:lo.hora_abre}"></div>
       <div class="fld"><label>Atendimento digital fecha</label><input class="num" data-lj="${lo.id}.hora_fecha" value="${lo.hora_fecha==null?22:lo.hora_fecha}"></div>
+      ${temDigital()?`<div class="fld"><label>Cliente sumida depois de (dias)</label><input class="num" data-lj="${lo.id}.fup_sumida" value="${lo.fup_sumida==null?60:lo.fup_sumida}"></div>`:''}
     </div>
+    ${temDigital()?`<label class="chk" style="margin-bottom:15px">
+      <input type="checkbox" data-abadig="${lo.id}" ${lo.aba_digital?'checked':''}>
+      As vendedoras de ${esc(lo.nome)} veem a aba Digital</label>`
+     :`<p class="note" style="margin:-9px 0 15px;color:var(--bad)">
+      Para ligar a aba Digital, rode o <b>digital.sql</b> no Supabase primeiro.</p>`}
+    <p class="note" style="margin:-9px 0 15px">Desmarcado, só você, a gerente e o tablet enxergam o digital
+      e o follow-up — a vendedora continua com a tela dela enxuta. Marcado, ela passa a ver a lista de
+      quem chamar e pode registrar atendimento por WhatsApp e Instagram.</p>
     <table><thead><tr><th>Pessoa</th><th style="width:120px">Papel</th><th class="r" style="width:150px">Meta individual</th><th style="width:46px"></th></tr></thead>
       <tbody>${pessoas.filter(p=>p.loja_id===lo.id).map(p=>`<tr>
         <td><input data-pn="${p.id}" value="${esc(p.nome)}"></td>
@@ -2458,6 +2786,42 @@ document.addEventListener('click', async e=>{
   }
   if(t.dataset.loja){ loja=t.dataset.loja; mesCarregado=''; await carregarDia(); await carregarMes(); render(); return; }
 
+  /* ---- digital e follow-up ---- */
+  if(t.dataset.dig)  return modalDigital(t.dataset.dig);
+  if(t.dataset.dcan){ G.canal=t.dataset.dcan;
+    [...document.querySelectorAll('[data-dcan]')].forEach(b=>
+      b.classList.toggle('on', b.dataset.dcan===G.canal));
+    return; }
+  if(t.dataset.fup){ G.filtro=t.dataset.fup; render(); return; }
+  if(t.dataset.ffez!==undefined && t.dataset.ffez!==''){
+    return registrarFup(G.lista[+t.dataset.ffez],'FALEI'); }
+  if(t.dataset.fsem!==undefined && t.dataset.fsem!==''){
+    return registrarFup(G.lista[+t.dataset.fsem],'SEM_RESPOSTA'); }
+  if(t.dataset.fdes!==undefined && t.dataset.fdes!==''){
+    return registrarFup(G.lista[+t.dataset.fdes],'NAO_QUER'); }
+  if(t.id==='pl_ok'){
+    const v=document.getElementById('pl_sel').value;
+    if(v){
+      const r=await sb.from('plantao').upsert({loja_id:loja,data:dia,vendedora:v,posto_por:eu.nome},
+        {onConflict:'loja_id,data'}).select().single();
+      if(r.error) return erro(r.error);
+      G.pl=G.pl.filter(p=>!(p.loja_id===loja&&p.data===dia)).concat([r.data]);
+      toast(v+' no plantão de '+labelDia(dia));
+    } else {
+      const r=await sb.from('plantao').delete().match({loja_id:loja,data:dia});
+      if(r.error) return erro(r.error);
+      G.pl=G.pl.filter(p=>!(p.loja_id===loja&&p.data===dia));
+      toast('Plantão removido');
+    }
+    render(); return;
+  }
+  if(t.dataset.rmdg){
+    const r=await sb.from('atendimentos').delete().eq('id',t.dataset.rmdg);
+    if(r.error) return erro(r.error);
+    D.at=D.at.filter(a=>a.id!==t.dataset.rmdg);
+    mesCarregado=''; render(); toast('Atendimento removido'); return;
+  }
+
   if(t.dataset.ini)   return iniciarAt(t.dataset.ini);
   if(t.dataset.pau)   return modalPausa(t.dataset.pau);
   if(t.dataset.volta) return mudarFila(t.dataset.volta,'disp');
@@ -2500,10 +2864,27 @@ document.addEventListener('click', async e=>{
         dados.valor=num(g('m_val')?g('m_val').value:0);
         if(!dados.sku){ toast('Informe o SKU procurado'); return; }
       }
+      const fn=(g('m_fnome')?g('m_fnome').value:'').trim().toUpperCase();
+      const ft=(g('m_ftel')?g('m_ftel').value:'').replace(/\D/g,'');
+      if(fn) dados.nome=fn;
+      if(ft) dados.telefone=ft;
     }
+    // no digital o contato vem dos campos do topo, e vale tanto para
+    // venda quanto para perda — é o que torna o follow-up possível
+    if(ctx.digital){
+      const nm=(g('d_nome')?g('d_nome').value:'').trim().toUpperCase();
+      const tl=(g('d_tel')?g('d_tel').value:'').replace(/\D/g,'');
+      if(nm) dados.nome=nm;
+      if(tl) dados.telefone=tl;
+      if(ctx.vendeu===true && nm && !ctx.cli){ ctx.cli=nm; ctx.tel=tl; }
+      // a venda nasce do canal do atendimento, não do seletor da loja
+      (venda||[]).forEach(v=>{ v.canal=G.canal; });
+    }
+    const dig=ctx.digital;
     const n=ctx.nome, cli=ctx.cli, tel=ctx.tel, tt=dados.valor, bol=dados.boleta;
     fechar();
-    await encerrarAt(n,dados,venda);
+    if(dig) await lancarDigital(n,dados,venda);
+    else    await encerrarAt(n,dados,venda);
     if(cli){
       if(!B.carregado) await carregarBonus();
       await gerarBonus({nome:cli, telefone:tel, total:tt, boleta:bol, vendedora:n, data:dia});
@@ -2980,6 +3361,16 @@ document.addEventListener('change', async e=>{
     if(i>=0) M.desp[i]=r.data;
     render(); toast('Classificada'); return;
   }
+  if(t.dataset.abadig){
+    const lid=t.dataset.abadig, lig=t.checked;
+    const r=await sb.from('lojas').update({aba_digital:lig}).eq('id',lid);
+    if(r.error){ t.checked=!lig; return erro(r.error); }
+    lojas.find(x=>x.id===lid).aba_digital=lig;
+    render();
+    toast(lig ? 'As vendedoras passam a ver a aba Digital'
+              : 'Aba Digital escondida das vendedoras');
+    return;
+  }
   if(t.dataset.lj){
     const p=t.dataset.lj.split('.'), o={}; o[p[1]]=num(t.value);
     const r=await sb.from('lojas').update(o).eq('id',p[0]);
@@ -3110,6 +3501,20 @@ function aplicarMudanca(tabela, p){
       }
     }
   }
+  // follow-up e plantão não vivem em D: eles alimentam a aba Digital, e o
+  // tempo real aqui serve para duas pessoas não chamarem a mesma cliente
+  if(tabela==='followups' && linha && linha.loja_id===loja){
+    if(!G.fup.some(f=>f.id===linha.id)){ G.fup.push(linha);
+      if(atual==='digital' && !MD.classList.contains('on')) render(); }
+    return;
+  }
+  if(tabela==='plantao'){
+    const ref=linha||velha; if(!ref) return;
+    G.pl=G.pl.filter(p=>!(p.loja_id===ref.loja_id&&p.data===ref.data));
+    if(linha) G.pl.push(linha);
+    if(atual==='digital' && !MD.classList.contains('on')) render();
+    return;
+  }
   const campo=DESTINO[tabela]; if(!campo) return;
   const arr=D[campo]; if(!arr) return;
   const mesma = tabela==='fila'
@@ -3132,7 +3537,7 @@ function ligarCanal(){
   if(canal) sb.removeChannel(canal);
   const liga=(c,t)=>c.on('postgres_changes',{event:'*',schema:'public',table:t},p=>aplicarMudanca(t,p));
   let c=sb.channel('salao');
-  ['fila','vendas','atendimentos','caixa_mov'].forEach(t=>{ c=liga(c,t); });
+  ['fila','vendas','atendimentos','caixa_mov','followups','plantao'].forEach(t=>{ c=liga(c,t); });
   canal=c.subscribe();
 }
 
